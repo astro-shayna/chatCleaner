@@ -4,9 +4,8 @@ import argparse
 import os
 import sys
 
-# Patterns
+# Regular expressions
 TIME_RE = re.compile(r"\d{1,2}:\d{2} [AP]M")
-BEGIN_REF_RE = re.compile(r"^Begin Reference,\s*(?P<preview>.+?)\.\.\. by (?P<orig>.+)$")
 PREVIEW_RE = re.compile(r"^(.+?) by (?P<speaker>.+)$")
 
 
@@ -28,37 +27,82 @@ def save_output(entries, out_path):
 
 
 def process_reference(lines, i, entries):
-    mref = BEGIN_REF_RE.match(lines[i].strip())
-    if not mref:
+    """
+    Parses 'Begin Reference' blocks into formatted entries.
+    """
+    if not lines[i].strip().startswith("Begin Reference"):
         return None
-    orig = mref.group('orig').strip()
-    referrer = lines[i+1].strip()
-    rt = TIME_RE.search(lines[i+2])
-    ref_time = rt.group(0) if rt else ''
-    # Skip blanks to original speaker
-    j = i + 3
-    while j < len(lines) and not lines[j].strip(): j += 1
 
-    speaker = lines[j].strip()
-    st = TIME_RE.search(lines[j+1])
-    speaker_time = st.group(0) if st else ''
-    # Collect original message lines
-    k = j + 2
-    orig_msg = []
-    while k < len(lines) and lines[k].strip():
-        orig_msg.append(lines[k].strip())
-        k += 1
-    # Skip blanks to comment
-    while k < len(lines) and not lines[k].strip(): k += 1
-    comment = []
-    while k < len(lines) and not BEGIN_REF_RE.match(lines[k].strip()) and not (k+1 < len(lines) and TIME_RE.search(lines[k+1])):
-        comment.append(lines[k].strip())
-        k += 1
-    entry = f"[{ref_time}][{referrer}][REFERENCE MESSAGE: ({speaker})({speaker_time})({' '.join(orig_msg)})]"
-    if comment:
-        entry += ' ' + ' '.join(comment)
+    n = len(lines)
+    j = i + 1
+    # Skip blank lines
+    while j < n and not lines[j].strip():
+        j += 1
+    if j >= n:
+        return n
+
+    # Referrer
+    ref_sender = lines[j].strip()
+    j += 1
+
+    # Skip blanks
+    while j < n and not lines[j].strip():
+        j += 1
+    if j >= n:
+        return j
+
+    # Reference timestamp
+    tm_line = lines[j].strip()
+    m = TIME_RE.search(tm_line)
+    ref_time = m.group(0) if m else tm_line
+    j += 1
+
+    # Skip blanks
+    while j < n and not lines[j].strip():
+        j += 1
+    if j >= n:
+        return j
+
+    # Original sender
+    orig_sender = lines[j].strip()
+    j += 1
+
+    # Skip blanks
+    while j < n and not lines[j].strip():
+        j += 1
+    if j >= n:
+        return j
+
+    # Original timestamp or message line
+    orig_line = lines[j].strip()
+    m2 = TIME_RE.search(orig_line)
+    if m2:
+        orig_time = m2.group(0)
+        j += 1
+        # Skip blanks
+        while j < n and not lines[j].strip():
+            j += 1
+        # Original message
+        orig_msg = lines[j].strip() if j < n else ""
+        j += 1
+    else:
+        orig_time = ""
+        orig_msg = orig_line
+        j += 1
+
+    # Follow-up lines
+    follow_up = []
+    while j < n and lines[j].strip():
+        follow_up.append(lines[j].strip())
+        j += 1
+
+    # Construct entry
+    entry = f"[{ref_time}][{ref_sender}][REFERENCE MESSAGE ({orig_time}) ({orig_sender})({orig_msg})]"
+    if follow_up:
+        entry += " " + " ".join(follow_up)
+
     entries.append(entry)
-    return k
+    return j
 
 
 def skip_preview(lines, i):
@@ -68,33 +112,38 @@ def skip_preview(lines, i):
         return None
     speaker = m.group('speaker').strip()
     j = i + 1
-    while j < len(lines) and not lines[j].strip(): j += 1
+    while j < len(lines) and not lines[j].strip():
+        j += 1
     if j < len(lines) and lines[j].strip() == speaker and j+1 < len(lines) and TIME_RE.search(lines[j+1]):
         return j
     return None
 
 
 def process_standard(lines, i, entries):
+    # Standard message: name on this line, time on next, then the body
     if i+1 >= len(lines) or not TIME_RE.search(lines[i+1]):
         return None
     name = lines[i].strip()
     tm = TIME_RE.search(lines[i+1]).group(0)
     j = i + 2
-    if j < len(lines) and not lines[j].strip(): j += 1
+    if j < len(lines) and not lines[j].strip():
+        j += 1
+
     body = []
-    while j < len(lines) and not BEGIN_REF_RE.match(lines[j].strip()) and not (j+1 < len(lines) and TIME_RE.search(lines[j+1])):
+    while j < len(lines) and not lines[j].startswith("Begin Reference") and not (j+1 < len(lines) and TIME_RE.search(lines[j+1])):
         txt = lines[j].strip()
         if txt.lower() == 'image':
             body.append('IMAGE ADDED TO CHAT')
         elif not PREVIEW_RE.match(txt):
             body.append(txt)
         j += 1
+
     entries.append(f"[{tm}][{name}] {' '.join(body).strip()}")
     return j
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Clean transcript, modularized into 3 functions')
+    parser = argparse.ArgumentParser(description='Clean transcript with reference parsing')
     parser.add_argument('input_file', help='Raw transcript .txt')
     parser.add_argument('-o', '--output', default='Formatted_Transcript.txt', help='Output filename')
     args = parser.parse_args()
