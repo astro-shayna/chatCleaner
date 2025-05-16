@@ -1,127 +1,125 @@
-
 #!/usr/bin/env python3
 import re
 import argparse
 import os
 import sys
 
-# Regex patterns
-time_pattern = r"\d{1,2}:\d{2} [AP]M"
-header_re = re.compile(
-    r"(?m)^(?P<name>.+?)\n"
-    r"(?:(?:Yesterday|\d{1,2}/\d{1,2}/\d{4})\s+)?"
-    r"(?P<time>" + time_pattern + r")\n\n"
-)
-preview_re = re.compile(r"\.\.\.\s*by\s*(?P<orig>.+)$")
+# Patterns
+TIME_RE = re.compile(r"\d{1,2}:\d{2} [AP]M")
+BEGIN_REF_RE = re.compile(r"^Begin Reference,\s*(?P<preview>.+?)\.\.\. by (?P<orig>.+)$")
+PREVIEW_RE = re.compile(r"^(.+?) by (?P<speaker>.+)$")
 
-# Load and save
-def load_text(path):
+
+def load_lines(path):
     try:
-        return open(path, encoding='utf-8').read()
+        return open(path, encoding='utf-8').read().splitlines()
     except Exception as e:
         print(f"Error reading '{path}': {e}", file=sys.stderr)
         sys.exit(1)
 
-def save_output(lines, out_path):
+
+def save_output(entries, out_path):
     try:
-        open(out_path, 'w', encoding='utf-8').write("\n\n".join(lines))
+        with open(out_path, 'w', encoding='utf-8') as f:
+            f.write("\n\n".join(entries))
     except Exception as e:
         print(f"Error writing '{out_path}': {e}", file=sys.stderr)
         sys.exit(1)
 
-# Preprocess: remove Begin Reference lines and full-line truncated previews
 
-def preprocess(text):
-    lines = text.splitlines(keepends=True)
-    out = []
+def process_reference(lines, i, entries):
+    mref = BEGIN_REF_RE.match(lines[i].strip())
+    if not mref:
+        return None
+    orig = mref.group('orig').strip()
+    referrer = lines[i+1].strip()
+    rt = TIME_RE.search(lines[i+2])
+    ref_time = rt.group(0) if rt else ''
+    # Skip blanks to original speaker
+    j = i + 3
+    while j < len(lines) and not lines[j].strip(): j += 1
+
+    speaker = lines[j].strip()
+    st = TIME_RE.search(lines[j+1])
+    speaker_time = st.group(0) if st else ''
+    # Collect original message lines
+    k = j + 2
+    orig_msg = []
+    while k < len(lines) and lines[k].strip():
+        orig_msg.append(lines[k].strip())
+        k += 1
+    # Skip blanks to comment
+    while k < len(lines) and not lines[k].strip(): k += 1
+    comment = []
+    while k < len(lines) and not BEGIN_REF_RE.match(lines[k].strip()) and not (k+1 < len(lines) and TIME_RE.search(lines[k+1])):
+        comment.append(lines[k].strip())
+        k += 1
+    entry = f"[{ref_time}][{referrer}][REFERENCE MESSAGE: ({speaker})({speaker_time})({' '.join(orig_msg)})]"
+    if comment:
+        entry += ' ' + ' '.join(comment)
+    entries.append(entry)
+    return k
+
+
+def skip_preview(lines, i):
+    raw = lines[i].strip()
+    m = PREVIEW_RE.match(raw)
+    if not m:
+        return None
+    speaker = m.group('speaker').strip()
+    j = i + 1
+    while j < len(lines) and not lines[j].strip(): j += 1
+    if j < len(lines) and lines[j].strip() == speaker and j+1 < len(lines) and TIME_RE.search(lines[j+1]):
+        return j
+    return None
+
+
+def process_standard(lines, i, entries):
+    if i+1 >= len(lines) or not TIME_RE.search(lines[i+1]):
+        return None
+    name = lines[i].strip()
+    tm = TIME_RE.search(lines[i+1]).group(0)
+    j = i + 2
+    if j < len(lines) and not lines[j].strip(): j += 1
+    body = []
+    while j < len(lines) and not BEGIN_REF_RE.match(lines[j].strip()) and not (j+1 < len(lines) and TIME_RE.search(lines[j+1])):
+        txt = lines[j].strip()
+        if txt.lower() == 'image':
+            body.append('IMAGE ADDED TO CHAT')
+        elif not PREVIEW_RE.match(txt):
+            body.append(txt)
+        j += 1
+    entries.append(f"[{tm}][{name}] {' '.join(body).strip()}")
+    return j
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Clean transcript, modularized into 3 functions')
+    parser.add_argument('input_file', help='Raw transcript .txt')
+    parser.add_argument('-o', '--output', default='Formatted_Transcript.txt', help='Output filename')
+    args = parser.parse_args()
+
+    lines = load_lines(args.input_file)
+    entries = []
     i = 0
     n = len(lines)
     while i < n:
-        line = lines[i]
-        if line.startswith('Begin Reference'):
-            # skip this tag
-            i += 1
+        ni = process_reference(lines, i, entries)
+        if ni is not None:
+            i = ni
             continue
-        m = preview_re.search(line.strip())
-        if m and i+1 < n:
-            # check next non-empty is orig speaker and next line is time
-            speaker = m.group('orig').strip()
-            # find next non-empty
-            j = i+1
-            while j<n and not lines[j].strip(): j+=1
-            if j<n and lines[j].strip() == speaker and j+1<n and re.search(time_pattern, lines[j+1]):
-                i += 1
-                continue
-        out.append(line)
+        ni = skip_preview(lines, i)
+        if ni is not None:
+            i = ni
+            continue
+        ni = process_standard(lines, i, entries)
+        if ni is not None:
+            i = ni
+            continue
         i += 1
-    return ''.join(out)
 
-# Extract raw blocks
-
-def extract_blocks(text):
-    matches = list(header_re.finditer(text))
-    blocks = []
-    for idx, m in enumerate(matches):
-        name = m.group('name').strip()
-        time = m.group('time').strip()
-        start = m.end()
-        end = matches[idx+1].start() if idx+1 < len(matches) else len(text)
-        body = text[start:end].strip()
-        # collapse lines
-        lines = [l.strip() for l in body.splitlines() if l.strip()]
-        # handle image
-        saw_image = False
-        parts = []
-        for l in lines:
-            if l.lower() == 'image': saw_image=True
-            else: parts.append(l)
-        msg = ' '.join(parts)
-        if saw_image:
-            msg = (msg + ' IMAGE ADDED TO CHAT') if msg else 'IMAGE ADDED TO CHAT'
-        blocks.append({'time': time, 'name': name, 'msg': msg})
-    return blocks
-
-# Consolidate inline references
-
-def consolidate_refs(blocks):
-    out = []
-    for i, b in enumerate(blocks):
-        m = preview_re.search(b['msg'])
-        if m:
-            orig = m.group('orig').strip()
-            # find next block for orig
-            ref_msg = ''
-            for b2 in blocks[i+1:]:
-                if b2['name'] == orig:
-                    ref_msg = b2['msg']
-                    break
-            # new comment = msg without truncated preview
-            new_comment = preview_re.sub('', b['msg']).strip()
-            entry = f"[{b['time']}][{b['name']}][REFERENCE MESSAGE: {ref_msg}]"
-            if new_comment:
-                entry += ' ' + new_comment
-            out.append(entry)
-        else:
-            out.append(f"[{b['time']}][{b['name']}] {b['msg']}")
-    return out
-
-# Main
-def main():
-    p = argparse.ArgumentParser(description='Clean transcript to [time][name] format')
-    p.add_argument('input_file')
-    p.add_argument('-o','--output', default='Formatted_Transcript.txt')
-    args = p.parse_args()
-
-    raw = load_text(args.input_file)
-    pre = preprocess(raw)
-    blocks = extract_blocks(pre)
-    lines = consolidate_refs(blocks)
-    if not lines:
-        print('Warning: no entries parsed', file=sys.stderr)
-    out_path = os.path.join(os.getcwd(), os.path.basename(args.output))
-    save_output(lines, out_path)
-    print(f"Success: cleaned transcript → {out_path}")
+    save_output(entries, os.path.basename(args.output))
+    print(f"Success: cleaned transcript → {args.output}")
 
 if __name__ == '__main__':
     main()
-
